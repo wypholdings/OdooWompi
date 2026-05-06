@@ -32,9 +32,10 @@ import logging
 import os
 import re
 import xmlrpc.client
+from urllib.parse import urlencode
 from datetime import date
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, redirect, request
 from dotenv import load_dotenv
 from flask_limiter import Limiter
 
@@ -90,6 +91,10 @@ ODOO_JOURNAL_NAME = os.getenv("ODOO_JOURNAL_NAME")
 WOMPI_EVENT_SECRET = os.getenv("WOMPI_EVENT_SECRET", "")
 SKIP_SIGNATURE_VALIDATION = os.getenv("SKIP_SIGNATURE_VALIDATION", "true").lower() == "true"
 PORT = int(os.getenv("PORT", "3008"))
+WOMPI_CHECKOUT_BASE_URL = os.getenv("WOMPI_CHECKOUT_BASE_URL", "https://checkout.wompi.co/p/")
+WOMPI_PUBLIC_KEY = os.getenv("WOMPI_PUBLIC_KEY", "").strip()
+WOMPI_INTEGRITY_SECRET = os.getenv("WOMPI_INTEGRITY_SECRET", "").strip()
+WOMPI_CURRENCY = os.getenv("WOMPI_CURRENCY", "COP").strip().upper()
 
 # Patrón de referencia de cotización Odoo: S seguido de dígitos (S00001, S00123, etc.)
 ODOO_REF_PATTERN = re.compile(r"^S\d+$")
@@ -141,6 +146,26 @@ def _resolve_property(data: dict, dotted_key: str):
         else:
             return ""
     return current if current is not None else ""
+
+
+def build_wompi_integrity_signature(reference: str, amount_in_cents: int, currency: str) -> str:
+    raw = f"{reference}{amount_in_cents}{currency}{WOMPI_INTEGRITY_SECRET}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def build_wompi_checkout_url(reference: str, amount_in_cents: int, customer_email: str = "") -> str:
+    currency = WOMPI_CURRENCY
+    signature = build_wompi_integrity_signature(reference, amount_in_cents, currency)
+    params = {
+        "public-key": WOMPI_PUBLIC_KEY,
+        "currency": currency,
+        "amount-in-cents": amount_in_cents,
+        "reference": reference,
+        "signature:integrity": signature,
+    }
+    if customer_email:
+        params["customer-data:email"] = customer_email
+    return f"{WOMPI_CHECKOUT_BASE_URL}?{urlencode(params)}"
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +447,40 @@ def wompi_webhook():
         return Response(status=500)
 
     return Response(status=200)
+
+
+@app.route("/wompi/checkout", methods=["GET"])
+def wompi_checkout():
+    reference = request.args.get("reference", "").strip().upper()
+    if not reference or not ODOO_REF_PATTERN.match(reference):
+        logger.error("Checkout inválido: reference '%s'", reference)
+        return Response("Referencia inválida.", status=400)
+
+    if not WOMPI_PUBLIC_KEY or not WOMPI_INTEGRITY_SECRET:
+        logger.error("Faltan WOMPI_PUBLIC_KEY o WOMPI_INTEGRITY_SECRET para checkout")
+        return Response("Checkout no configurado.", status=500)
+
+    try:
+        odoo.connect()
+        order = odoo.find_sale_order(reference)
+        if not order:
+            logger.error("Checkout: no existe cotización '%s'", reference)
+            return Response("Cotización no encontrada.", status=404)
+
+        amount_in_cents = int(round(float(order["amount_total"]) * 100))
+        customer_email = ""
+        partner_data = order.get("partner_id")
+        if isinstance(partner_data, list) and partner_data:
+            partner = odoo.call("res.partner", "read", [[partner_data[0]]], {"fields": ["email"]})
+            if partner and partner[0].get("email"):
+                customer_email = partner[0]["email"]
+
+        checkout_url = build_wompi_checkout_url(reference, amount_in_cents, customer_email)
+        logger.info("Checkout WOMPI generado para %s por %s centavos", reference, amount_in_cents)
+        return redirect(checkout_url, code=302)
+    except Exception as e:
+        logger.error("Error generando checkout WOMPI para %s: %s", reference, e, exc_info=True)
+        return Response("Lo sentimos, ocurrió un error al procesar tu solicitud de pago.", status=500)
 
 
 @app.route("/health", methods=["GET"])
