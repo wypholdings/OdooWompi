@@ -41,7 +41,8 @@ from flask_limiter import Limiter
 # ---------------------------------------------------------------------------
 # Carga de Configuración (.env)
 # ---------------------------------------------------------------------------
-load_dotenv()
+basedir = os.path.abspath(os.path.dirname(__file__))
+load_dotenv(os.path.join(basedir, '.env'))
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
