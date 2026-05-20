@@ -1,6 +1,3 @@
-                                <!-- ✅ BOTÓN WOMPI — misma lógica de visibilidad que "Pagar ahora" -->
-                                
-                                
-<a t-if="(sale_order._has_to_be_paid()           or (payment_amount               and sale_order.amount_paid &lt; sale_order.amount_total               and sale_order.state != 'cancel'))          and sale_order.payment_term_id.name == 'Pago inmediato'" role="button" class="btn btn-outline-primary" target="_blank" onclick="this.href=this.href.replace(/&amp;_t=\d+/,'')+'&amp;_t='+Date.now()" t-attf-href="https://checkout.wompi.co/l/VPOS_r9Qbb4?_ga=2.250750659.434397148.1634852030-1718056268.1634852030;reference=#{sale_order.name}">
+<a t-if="(sale_order._has_to_be_paid()           or (payment_amount               and sale_order.amount_paid &lt; sale_order.amount_total               and sale_order.state != 'cancel'))          and sale_order.payment_term_id.name == 'Pago inmediato'" role="button" class="btn btn-outline-primary" target="_blank" onclick="this.href=this.href.replace(/&amp;_t=\d+/,'')+'&amp;_t='+Date.now()" t-att-href="'https://webhooks-odoo.wondertech.com.co/wompi/checkout?reference=%s&amp;amount_in_cents=%s' % (sale_order.name, int(round(sale_order.amount_total * 100)))">
     <i class="fa fa-credit-card me-1"/> Pagar con PSE
-</a>  
+</a>
