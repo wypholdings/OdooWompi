@@ -1,0 +1,17 @@
+module.exports = {
+  apps: [{
+    name: "wompi-webhook",
+    script: "wompi_odoo_webhook.py",
+    interpreter: "python3",
+    env: {
+      ODOO_URL: "https://wondertech.odoo.com",
+      ODOO_DB: "wondertech",
+      ODOO_USER: "daniel.wilches@wondertech.com.co",
+      ODOO_API_KEY: "2279184bdff1d2e859bc2ab1543076e8f1f94e86",
+      ODOO_JOURNAL_NAME: "Banco Bancolombia Corriente 10822160406",
+      WOMPI_EVENT_SECRET: process.env.WOMPI_EVENT_SECRET || "",
+      SKIP_SIGNATURE_VALIDATION: "true",
+      PORT: "8000",
+    },
+  }],
+};

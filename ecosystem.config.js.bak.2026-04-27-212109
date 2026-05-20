@@ -1,0 +1,19 @@
+module.exports = {
+  apps: [{
+    name: "wompi-webhook",
+    script: "wompi_odoo_webhook.py",
+    interpreter: "python3",
+    env: {
+      ODOO_URL: "https://pruebasabril-2.odoo.com",
+      ODOO_DB: "pruebasabril-2",
+      ODOO_USER: "daniel.wilches@wondertech.com.co",
+      ODOO_API_KEY: "97bd0b33661d8b3ff96abb08b7fc413f5b7563ef",
+      ODOO_JOURNAL_NAME: "Banco Bancolombia Corriente 10822160406",
+      WOMPI_EVENT_SECRET: process.env.WOMPI_EVENT_SECRET || "",
+      WOMPI_PUBLIC_KEY: process.env.WOMPI_PUBLIC_KEY || "",
+      WOMPI_INTEGRITY_SECRET: process.env.WOMPI_INTEGRITY_SECRET || "",
+      SKIP_SIGNATURE_VALIDATION: "true",
+      PORT: "8000",
+    },
+  }],
+};

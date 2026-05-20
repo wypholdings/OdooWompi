@@ -31,76 +31,30 @@ import hmac
 import logging
 import os
 import re
-import time
 import xmlrpc.client
-from urllib.parse import urlencode
 from datetime import date
 
-from flask import Flask, Response, jsonify, redirect, request
-from dotenv import load_dotenv
-from flask_limiter import Limiter
+from flask import Flask, Response, jsonify, request
 
 # ---------------------------------------------------------------------------
-# Carga de Configuración (.env)
+# Configuración — todo desde variables de entorno
 # ---------------------------------------------------------------------------
-basedir = os.path.abspath(os.path.dirname(__file__))
-load_dotenv(os.path.join(basedir, '.env'))
-
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# 🛡️ SEGURIDAD: RATE LIMITING Y TOKEN
-# ==========================================
-def get_client_ip():
-    return request.headers.get("X-Forwarded-For", request.remote_addr).split(',')[0].strip()
+ODOO_URL = os.environ["ODOO_URL"]
+ODOO_DB = os.environ["ODOO_DB"]
+ODOO_USER = os.environ["ODOO_USER"]
+ODOO_PASSWORD = os.environ["ODOO_API_KEY"]
+ODOO_JOURNAL_NAME = os.environ["ODOO_JOURNAL_NAME"]
 
-limiter = Limiter(
-    get_client_ip,
-    app=app,
-    default_limits=["100 per day", "20 per hour"],
-    storage_uri="memory://",
-)
+WOMPI_EVENT_SECRET = os.environ.get("WOMPI_EVENT_SECRET", "")
+SKIP_SIGNATURE_VALIDATION = os.environ.get("SKIP_SIGNATURE_VALIDATION", "true").lower() == "true"
+PORT = int(os.environ.get("PORT", "8000"))
 
-def _validate_webhook_token():
-    """Valida el token de seguridad para peticiones que no vienen de WOMPI (ej: Odoo o Admin)"""
-    expected = os.getenv("WEBHOOK_TOKEN", "").strip()
-    if not expected:
-        return None 
-    
-    candidates = [
-        request.headers.get("X-Webhook-Token", "").strip(),
-        request.args.get("token", "").strip(),
-    ]
-    
-    if expected in candidates:
-        return None
-        
-    # Nota: WOMPI usa validación de firma (checksum), 
-    # pero este token sirve para llamadas manuales o de Odoo.
-    return None # Por ahora permitimos pasar para no romper el webhook de Wompi 
-                 # que no envía este token personalizado.
-
-# Configuración Odoo
-ODOO_URL = os.getenv("ODOO_URL")
-ODOO_DB = os.getenv("ODOO_DB")
-ODOO_USER = os.getenv("ODOO_USER")
-ODOO_PASSWORD = os.getenv("ODOO_API_KEY")
-ODOO_JOURNAL_NAME = os.getenv("ODOO_JOURNAL_NAME")
-
-WOMPI_EVENT_SECRET = os.getenv("WOMPI_EVENT_SECRET", "")
-SKIP_SIGNATURE_VALIDATION = os.getenv("SKIP_SIGNATURE_VALIDATION", "true").lower() == "true"
-PORT = int(os.getenv("PORT", "3008"))
-WOMPI_CHECKOUT_BASE_URL = os.getenv("WOMPI_CHECKOUT_BASE_URL", "https://checkout.wompi.co/p/")
-WOMPI_PUBLIC_KEY = os.getenv("WOMPI_PUBLIC_KEY", "").strip()
-WOMPI_INTEGRITY_SECRET = os.getenv("WOMPI_INTEGRITY_SECRET", "").strip()
-WOMPI_CURRENCY = os.getenv("WOMPI_CURRENCY", "COP").strip().upper()
-
-# Patrón base de referencia de cotización Odoo: S seguido de dígitos (S00001, S00123, etc.)
-# También aceptamos sufijos para intentos de pago únicos en Wompi: S00001-123456789
+# Patrón de referencia de cotización Odoo: S seguido de dígitos (S00001, S00123, etc.)
 ODOO_REF_PATTERN = re.compile(r"^S\d+$")
-ODOO_REF_WITH_SUFFIX_PATTERN = re.compile(r"^(S\d+)(?:[-_].+)?$")
 
 
 # ---------------------------------------------------------------------------
@@ -149,33 +103,6 @@ def _resolve_property(data: dict, dotted_key: str):
         else:
             return ""
     return current if current is not None else ""
-
-
-def build_wompi_integrity_signature(reference: str, amount_in_cents: int, currency: str) -> str:
-    raw = f"{reference}{amount_in_cents}{currency}{WOMPI_INTEGRITY_SECRET}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def build_wompi_checkout_url(reference: str, amount_in_cents: int, customer_email: str = "") -> str:
-    currency = WOMPI_CURRENCY
-    params = {
-        "public-key": WOMPI_PUBLIC_KEY,
-        "currency": currency,
-        "amount-in-cents": amount_in_cents,
-        "reference": reference,
-    }
-    if WOMPI_INTEGRITY_SECRET:
-        params["signature:integrity"] = build_wompi_integrity_signature(reference, amount_in_cents, currency)
-    if customer_email:
-        params["customer-data:email"] = customer_email
-    return f"{WOMPI_CHECKOUT_BASE_URL}?{urlencode(params)}"
-
-
-def extract_odoo_reference(raw_reference: str) -> str:
-    """Extrae la referencia base de Odoo desde una referencia Wompi."""
-    raw = (raw_reference or "").strip().upper()
-    match = ODOO_REF_WITH_SUFFIX_PATTERN.match(raw)
-    return match.group(1) if match else ""
 
 
 # ---------------------------------------------------------------------------
@@ -241,26 +168,7 @@ class OdooClient:
             except xmlrpc.client.Fault as e:
                 # Odoo 18 retorna None desde action_post y el marshaller lo rechaza,
                 # pero la acción sí se ejecutó. Ignoramos solo este caso.
-                fault_msg = str(e)
-                if "cannot marshal None" in fault_msg:
-                    return payment_id
-                # Si hay reglas de seguridad contable, no bloqueamos el webhook.
-                # Dejamos el pago en borrador y continuamos el flujo.
-                if "no tiene acceso 'crear' a" in fault_msg and "account.move.line" in fault_msg:
-                    logger.warning(
-                        "Sin permisos para postear account.payment (account.move.line). "
-                        "Se mantiene en borrador y se continúa el flujo. fault=%s",
-                        fault_msg,
-                    )
-                    return payment_id
-                if "Estos registros están restringidos" in fault_msg and "Líneas de asiento diario" in fault_msg:
-                    logger.warning(
-                        "Regla de registro bloqueó posteo contable. "
-                        "Se mantiene pago en borrador y se continúa. fault=%s",
-                        fault_msg,
-                    )
-                    return payment_id
-                if "cannot marshal None" not in fault_msg:
+                if "cannot marshal None" not in str(e):
                     raise
 
         return payment_id
@@ -436,17 +344,16 @@ def wompi_webhook():
         return Response(status=200)
 
     transaction = payload.get("data", {}).get("transaction", {})
-    raw_reference = transaction.get("reference", "")
-    reference = extract_odoo_reference(raw_reference)
+    reference = transaction.get("reference", "")
     status = transaction.get("status", "")
     amount_in_cents = transaction.get("amount_in_cents", 0)
     transaction_id = transaction.get("id", "")
 
-    logger.info("Transacción: id=%s | ref_raw=%s | ref_odoo=%s | estado=%s | monto=%s centavos",
-                transaction_id, raw_reference, reference, status, amount_in_cents)
+    logger.info("Transacción: id=%s | ref=%s | estado=%s | monto=%s centavos",
+                transaction_id, reference, status, amount_in_cents)
 
-    if not reference or not ODOO_REF_PATTERN.match(reference):
-        logger.info("Referencia '%s' no es formato Odoo. Ignorado.", raw_reference)
+    if not ODOO_REF_PATTERN.match(reference):
+        logger.info("Referencia '%s' no es formato Odoo. Ignorado.", reference)
         return Response(status=200)
 
     if status in ("VOIDED", "DECLINED", "ERROR"):
@@ -477,58 +384,6 @@ def wompi_webhook():
         return Response(status=500)
 
     return Response(status=200)
-
-
-@app.route("/checkout", methods=["GET"])
-@app.route("/wompi/checkout", methods=["GET"])
-def wompi_checkout():
-    reference = request.args.get("reference", "").strip().upper()
-    if not reference or not ODOO_REF_PATTERN.match(reference):
-        logger.error("Checkout inválido: reference '%s'", reference)
-        return Response("Referencia inválida.", status=400)
-
-    if not WOMPI_PUBLIC_KEY:
-        logger.error("Falta WOMPI_PUBLIC_KEY para checkout")
-        return Response("Checkout no configurado.", status=500)
-
-    amount_in_cents = request.args.get("amount_in_cents", type=int)
-    customer_email = ""
-    if amount_in_cents is None:
-        try:
-            odoo.connect()
-            order = odoo.find_sale_order(reference)
-            if not order:
-                logger.error("Checkout: no existe cotización '%s'", reference)
-                return Response("Cotización no encontrada.", status=404)
-            amount_in_cents = int(round(float(order["amount_total"]) * 100))
-            partner_data = order.get("partner_id")
-            if isinstance(partner_data, list) and partner_data:
-                partner = odoo.call("res.partner", "read", [[partner_data[0]]], {"fields": ["email"]})
-                if partner and partner[0].get("email"):
-                    customer_email = partner[0]["email"]
-        except Exception as e:
-            logger.error("Error consultando Odoo para checkout %s: %s", reference, e, exc_info=True)
-            return Response(
-                "Odoo no disponible. Reintenta con ?amount_in_cents= en la URL para continuar.",
-                status=503,
-            )
-
-    if not amount_in_cents or amount_in_cents <= 0:
-        return Response("amount_in_cents inválido.", status=400)
-
-    try:
-        # Wompi exige referencias únicas por intento.
-        attempt_id = request.args.get("_t", "").strip() or request.args.get("attempt_id", "").strip()
-        wompi_reference = f"{reference}-{attempt_id}" if attempt_id else f"{reference}-{int(time.time())}"
-        checkout_url = build_wompi_checkout_url(wompi_reference, amount_in_cents, customer_email)
-        logger.info(
-            "Checkout WOMPI generado ref_odoo=%s ref_wompi=%s por %s centavos",
-            reference, wompi_reference, amount_in_cents
-        )
-        return redirect(checkout_url, code=302)
-    except Exception as e:
-        logger.error("Error generando checkout WOMPI para %s: %s", reference, e, exc_info=True)
-        return Response("Lo sentimos, ocurrió un error al procesar tu solicitud de pago.", status=500)
 
 
 @app.route("/health", methods=["GET"])
