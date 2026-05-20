@@ -116,5 +116,5 @@ El webhook debe enrutar a Flask en puerto `7000`:
 
 ## Documentación adicional
 
-- [Despliegue y Operación](./docs/DEPLOYMENT.md)
-- [Troubleshooting](./docs/TROUBLESHOOTING.md)
+- [Despliegue y Operación](./Documentación/DEPLOYMENT.md)
+- [Troubleshooting](./Documentación/TROUBLESHOOTING.md)
