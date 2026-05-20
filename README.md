@@ -33,6 +33,31 @@ Este servicio Flask expone:
 - Acceso XML-RPC a Odoo (`/xmlrpc/2/common`, `/xmlrpc/2/object`)
 - Proveedor de pago Wompi configurado en Odoo (`payment.provider` + `payment.method`)
 
+## Permisos
+
+1. sale.order
+read (buscar cotización por referencia, leer total/estado/partner/currency)
+write + ejecutar acción action_confirm (confirmar cotización cuando el pago cubre total)
+2. account.payment
+create (crear pago entrante)
+read (buscar pagos previos por memo)
+3. ejecutar action_post (postear pago)
+4. account.move.line (apuntes contables)
+create (lo exige Odoo al postear account.payment)
+read (normalmente implícito por reglas contables)
+5. payment.transaction
+read (buscar transacciones pendientes de la orden)
+write (marcar pending -> done)
+create (crear transacción done/pending para portal)
+6. payment.provider
+read (buscar provider Wompi)
+7. payment.method
+read (buscar método ligado al provider o unknown)
+8. res.partner
+read (lectura de email/contacto en flujo de notificación)
+9. account.journal
+read (si dejan diario dinámico; hoy está fijo en código, pero igual recomendable)
+
 ## Variables de entorno
 
 Variables principales:
