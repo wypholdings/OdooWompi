@@ -28,10 +28,12 @@ PM2:
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
 import time
+import urllib.request
 import xmlrpc.client
 from urllib.parse import urlencode
 from datetime import date
@@ -102,6 +104,8 @@ WOMPI_REDIRECT_URL = os.getenv("WOMPI_REDIRECT_URL", "").strip()
 # Nombre (o parte del nombre) del payment.provider en Odoo. Antes era "Wompi";
 # si lo renombran en Odoo (ej. "PSE"), ajustar esta variable sin tocar código.
 ODOO_PAYMENT_PROVIDER_NAME = os.getenv("ODOO_PAYMENT_PROVIDER_NAME", "wompi").strip()
+# API de Wompi para consultar transacciones en el regreso del cliente (/wompi/return)
+WOMPI_API_BASE_URL = os.getenv("WOMPI_API_BASE_URL", "https://production.wompi.co/v1").strip().rstrip("/")
 
 # Patrón base de referencia de cotización Odoo: S seguido de dígitos (S00001, S00123, etc.)
 # También aceptamos sufijos para intentos de pago únicos en Wompi: S00001-123456789
@@ -177,6 +181,14 @@ def build_wompi_checkout_url(reference: str, amount_in_cents: int, customer_emai
     if WOMPI_REDIRECT_URL:
         params["redirect-url"] = WOMPI_REDIRECT_URL
     return f"{WOMPI_CHECKOUT_BASE_URL}?{urlencode(params)}"
+
+
+def fetch_wompi_transaction(transaction_id: str) -> dict:
+    """Consulta una transacción en la API de Wompi (autenticada con la llave pública)."""
+    url = f"{WOMPI_API_BASE_URL}/transactions/{transaction_id}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {WOMPI_PUBLIC_KEY}"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8")).get("data", {})
 
 
 def extract_odoo_reference(raw_reference: str) -> str:
@@ -584,6 +596,45 @@ def wompi_checkout():
     except Exception as e:
         logger.error("Error generando checkout WOMPI para %s: %s", reference, e, exc_info=True)
         return Response("Lo sentimos, ocurrió un error al procesar tu solicitud de pago.", status=500)
+
+
+@app.route("/return", methods=["GET"])
+@app.route("/wompi/return", methods=["GET"])
+def wompi_return():
+    """
+    Regreso del cliente desde Wompi (redirect-url). Wompi agrega ?id=<transaction_id>.
+    Consulta la transacción, identifica la orden de Odoo y redirige a la página
+    de ESA orden en el portal. Ante cualquier falla, cae en /my/orders.
+    """
+    fallback_url = f"{ODOO_URL}/my/orders"
+    tx_id = request.args.get("id", "").strip()
+    if not tx_id:
+        return redirect(fallback_url, code=302)
+
+    try:
+        tx = fetch_wompi_transaction(tx_id)
+        reference = extract_odoo_reference(tx.get("reference", ""))
+        if not reference:
+            logger.info("Return WOMPI tx=%s sin referencia Odoo. Fallback.", tx_id)
+            return redirect(fallback_url, code=302)
+
+        odoo.connect()
+        order = odoo.find_sale_order(reference)
+        if not order:
+            logger.info("Return WOMPI tx=%s: orden '%s' no encontrada. Fallback.", tx_id, reference)
+            return redirect(fallback_url, code=302)
+
+        token = odoo.call(
+            "sale.order", "read", [[order["id"]]], {"fields": ["access_token"]}
+        )[0].get("access_token")
+        order_url = f"{ODOO_URL}/my/orders/{order['id']}"
+        if token:
+            order_url += f"?access_token={token}"
+        logger.info("Return WOMPI tx=%s -> orden %s", tx_id, order["name"])
+        return redirect(order_url, code=302)
+    except Exception as e:
+        logger.error("Error en return WOMPI tx=%s: %s", tx_id, e, exc_info=True)
+        return redirect(fallback_url, code=302)
 
 
 @app.route("/health", methods=["GET"])
