@@ -30,9 +30,20 @@ WOMPI_INTEGRITY_SECRET=<prod_integrity_...>
 WOMPI_EVENT_SECRET=<prod_events_...>
 
 WOMPI_CURRENCY=COP
+WOMPI_REDIRECT_URL=https://webhooks-odoo.wondertech.com.co/wompi/return
+ODOO_PAYMENT_PROVIDER_NAME=PSE
 PORT=7000
 SKIP_SIGNATURE_VALIDATION=false
 ```
+
+Nota sobre `WOMPI_REDIRECT_URL`:
+- Es opcional. Si está vacía o no existe, el checkout se genera igual que antes (sin redirección).
+- Wompi redirige al cliente a esa URL al finalizar el pago, agregando `?id=<transaction_id>`.
+- Valor recomendado: el endpoint `/wompi/return` de este mismo servicio, que lleva
+  al cliente a la página de SU orden en el portal de Odoo. No usar
+  `/shop/confirmation` de Odoo: esa página muestra la orden de la sesión de
+  eCommerce del navegador, no la orden pagada.
+- La confirmación de la orden en Odoo NO depende de esta redirección: la sigue haciendo el webhook `transaction.updated`.
 
 ## 3) Iniciar/reiniciar servicio
 

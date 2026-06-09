@@ -28,10 +28,12 @@ PM2:
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
 import time
+import urllib.request
 import xmlrpc.client
 from urllib.parse import urlencode
 from datetime import date
@@ -96,6 +98,14 @@ WOMPI_CHECKOUT_BASE_URL = os.getenv("WOMPI_CHECKOUT_BASE_URL", "https://checkout
 WOMPI_PUBLIC_KEY = os.getenv("WOMPI_PUBLIC_KEY", "").strip()
 WOMPI_INTEGRITY_SECRET = os.getenv("WOMPI_INTEGRITY_SECRET", "").strip()
 WOMPI_CURRENCY = os.getenv("WOMPI_CURRENCY", "COP").strip().upper()
+# URL a la que Wompi redirige al cliente tras finalizar el pago (opcional).
+# Wompi le agrega ?id=<transaction_id> automáticamente.
+WOMPI_REDIRECT_URL = os.getenv("WOMPI_REDIRECT_URL", "").strip()
+# Nombre (o parte del nombre) del payment.provider en Odoo. Antes era "Wompi";
+# si lo renombran en Odoo (ej. "PSE"), ajustar esta variable sin tocar código.
+ODOO_PAYMENT_PROVIDER_NAME = os.getenv("ODOO_PAYMENT_PROVIDER_NAME", "wompi").strip()
+# API de Wompi para consultar transacciones en el regreso del cliente (/wompi/return)
+WOMPI_API_BASE_URL = os.getenv("WOMPI_API_BASE_URL", "https://production.wompi.co/v1").strip().rstrip("/")
 
 # Patrón base de referencia de cotización Odoo: S seguido de dígitos (S00001, S00123, etc.)
 # También aceptamos sufijos para intentos de pago únicos en Wompi: S00001-123456789
@@ -168,7 +178,17 @@ def build_wompi_checkout_url(reference: str, amount_in_cents: int, customer_emai
         params["signature:integrity"] = build_wompi_integrity_signature(reference, amount_in_cents, currency)
     if customer_email:
         params["customer-data:email"] = customer_email
+    if WOMPI_REDIRECT_URL:
+        params["redirect-url"] = WOMPI_REDIRECT_URL
     return f"{WOMPI_CHECKOUT_BASE_URL}?{urlencode(params)}"
+
+
+def fetch_wompi_transaction(transaction_id: str) -> dict:
+    """Consulta una transacción en la API de Wompi (autenticada con la llave pública)."""
+    url = f"{WOMPI_API_BASE_URL}/transactions/{transaction_id}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {WOMPI_PUBLIC_KEY}"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8")).get("data", {})
 
 
 def extract_odoo_reference(raw_reference: str) -> str:
@@ -267,17 +287,18 @@ class OdooClient:
 
     def _find_payment_provider(self) -> int:
         """
-        Busca el payment.provider 'Wompi'. Debe existir previamente en Odoo.
+        Busca el payment.provider configurado (ODOO_PAYMENT_PROVIDER_NAME).
+        Debe existir previamente en Odoo.
         """
         provs = self.call(
             "payment.provider", "search",
-            [[["name", "ilike", "wompi"]]],
+            [[["name", "ilike", ODOO_PAYMENT_PROVIDER_NAME]]],
             {"limit": 1},
         )
         if not provs:
             raise RuntimeError(
-                "No se encontró payment.provider 'Wompi' en Odoo. "
-                "Créelo manualmente antes de usar este webhook."
+                f"No se encontró payment.provider '{ODOO_PAYMENT_PROVIDER_NAME}' en Odoo. "
+                "Créelo manualmente o ajuste ODOO_PAYMENT_PROVIDER_NAME en el .env."
             )
         return provs[0]
 
@@ -317,6 +338,20 @@ class OdooClient:
         partner_id = order["partner_id"][0]
 
         logger.info("Procesando pago PENDIENTE para %s | Monto: $%.2f", order_name, amount_paid)
+
+        # Idempotencia: si ya existe payment.transaction con esta referencia
+        # (evento reintentado), no crear otra.
+        existing_tx = self.call(
+            "payment.transaction", "search",
+            [[["reference", "=", f"WOMPI-{wompi_transaction_id}"]]],
+            {"limit": 1},
+        )
+        if existing_tx:
+            logger.info(
+                "payment.transaction WOMPI-%s ya existe (id=%s). Evento PENDING reintentado, sin acción.",
+                wompi_transaction_id, existing_tx[0],
+            )
+            return
 
         # Obtener moneda de la cotización
         order_full = self.call(
@@ -368,10 +403,27 @@ class OdooClient:
             order_name, amount_paid, total_paid, order_total, should_confirm,
         )
 
-        # Primero crear el pago en el diario de banco
-        payment_id = self._create_payment(order, amount_paid, wompi_transaction_id, post=True)
-        logger.info("Pago APROBADO (id=%s) para %s | $%.2f | WOMPI: %s",
-                    payment_id, order_name, amount_paid, wompi_transaction_id)
+        # Idempotencia: si Wompi reintenta el evento (ej. tras un 500 previo),
+        # no crear un segundo account.payment para la misma transacción.
+        memo = f"WOMPI {wompi_transaction_id} - {order_name}"
+        existing_for_tx = self.call(
+            "account.payment", "search",
+            [[["memo", "=", memo]]],
+            {"limit": 1},
+        )
+        if existing_for_tx:
+            logger.info(
+                "account.payment ya existe (id=%s) para WOMPI %s. Evento reintentado, no se duplica el pago.",
+                existing_for_tx[0], wompi_transaction_id,
+            )
+            payment_id = existing_for_tx[0]
+            total_paid -= amount_paid  # ya estaba contado en existing_payments
+            should_confirm = total_paid >= order_total
+        else:
+            # Primero crear el pago en el diario de banco
+            payment_id = self._create_payment(order, amount_paid, wompi_transaction_id, post=True)
+            logger.info("Pago APROBADO (id=%s) para %s | $%.2f | WOMPI: %s",
+                        payment_id, order_name, amount_paid, wompi_transaction_id)
 
         # Luego confirmar como orden de venta si el acumulado cubre el total
         if should_confirm and order["state"] in ("draft", "sent"):
@@ -386,6 +438,21 @@ class OdooClient:
         if pending_txs:
             self.call("payment.transaction", "write", [pending_txs, {"state": "done"}])
             logger.info("payment.transaction pendientes %s marcadas como done", pending_txs)
+
+        # Idempotencia: si ya existe payment.transaction con esta referencia
+        # (evento reintentado, o la pendiente recién marcada done), no crear otra.
+        # Además Odoo exige referencia única en payment.transaction.
+        existing_tx = self.call(
+            "payment.transaction", "search",
+            [[["reference", "=", f"WOMPI-{wompi_transaction_id}"]]],
+            {"limit": 1},
+        )
+        if existing_tx:
+            logger.info(
+                "payment.transaction WOMPI-%s ya existe (id=%s). No se crea otra.",
+                wompi_transaction_id, existing_tx[0],
+            )
+            return
 
         # Crear payment.transaction en estado 'done' para reflejar el pago en el portal
         order_full = self.call(
@@ -529,6 +596,45 @@ def wompi_checkout():
     except Exception as e:
         logger.error("Error generando checkout WOMPI para %s: %s", reference, e, exc_info=True)
         return Response("Lo sentimos, ocurrió un error al procesar tu solicitud de pago.", status=500)
+
+
+@app.route("/return", methods=["GET"])
+@app.route("/wompi/return", methods=["GET"])
+def wompi_return():
+    """
+    Regreso del cliente desde Wompi (redirect-url). Wompi agrega ?id=<transaction_id>.
+    Consulta la transacción, identifica la orden de Odoo y redirige a la página
+    de ESA orden en el portal. Ante cualquier falla, cae en /my/orders.
+    """
+    fallback_url = f"{ODOO_URL}/my/orders"
+    tx_id = request.args.get("id", "").strip()
+    if not tx_id:
+        return redirect(fallback_url, code=302)
+
+    try:
+        tx = fetch_wompi_transaction(tx_id)
+        reference = extract_odoo_reference(tx.get("reference", ""))
+        if not reference:
+            logger.info("Return WOMPI tx=%s sin referencia Odoo. Fallback.", tx_id)
+            return redirect(fallback_url, code=302)
+
+        odoo.connect()
+        order = odoo.find_sale_order(reference)
+        if not order:
+            logger.info("Return WOMPI tx=%s: orden '%s' no encontrada. Fallback.", tx_id, reference)
+            return redirect(fallback_url, code=302)
+
+        token = odoo.call(
+            "sale.order", "read", [[order["id"]]], {"fields": ["access_token"]}
+        )[0].get("access_token")
+        order_url = f"{ODOO_URL}/my/orders/{order['id']}"
+        if token:
+            order_url += f"?access_token={token}"
+        logger.info("Return WOMPI tx=%s -> orden %s", tx_id, order["name"])
+        return redirect(order_url, code=302)
+    except Exception as e:
+        logger.error("Error en return WOMPI tx=%s: %s", tx_id, e, exc_info=True)
+        return redirect(fallback_url, code=302)
 
 
 @app.route("/health", methods=["GET"])

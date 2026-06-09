@@ -11,6 +11,7 @@ Integración entre Wompi y Odoo para:
 Este servicio Flask expone:
 - `GET /checkout` y `GET /wompi/checkout`: genera URL de checkout Wompi con firma de integridad.
 - `POST /webhooks/wompi`: procesa eventos de pago de Wompi y sincroniza estado en Odoo.
+- `GET /return` y `GET /wompi/return`: regreso del cliente desde Wompi (`?id=<tx>`); consulta la transacción, identifica la orden y redirige a la página de esa orden en el portal de Odoo (`/my/orders/<id>?access_token=...`). Fallback: `/my/orders`.
 - `GET /health`: healthcheck simple.
 
 ## Arquitectura resumida
@@ -72,6 +73,8 @@ Variables principales:
 - `WOMPI_EVENT_SECRET`
 - `WOMPI_CURRENCY` (default `COP`)
 - `WOMPI_CHECKOUT_BASE_URL` (default `https://checkout.wompi.co/p/`)
+- `WOMPI_REDIRECT_URL` (opcional; URL a la que Wompi redirige al cliente al terminar el pago, ej. `https://wondertechsas.odoo.com/shop/confirmation`. Wompi le agrega `?id=<transaction_id>`)
+- `ODOO_PAYMENT_PROVIDER_NAME` (default `wompi`; nombre —o parte del nombre— del `payment.provider` en Odoo. Si lo renombran en Odoo, ej. a `PSE`, ajustar aquí)
 - `SKIP_SIGNATURE_VALIDATION` (`true`/`false`)
 - `PORT`
 
