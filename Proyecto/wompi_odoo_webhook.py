@@ -96,6 +96,9 @@ WOMPI_CHECKOUT_BASE_URL = os.getenv("WOMPI_CHECKOUT_BASE_URL", "https://checkout
 WOMPI_PUBLIC_KEY = os.getenv("WOMPI_PUBLIC_KEY", "").strip()
 WOMPI_INTEGRITY_SECRET = os.getenv("WOMPI_INTEGRITY_SECRET", "").strip()
 WOMPI_CURRENCY = os.getenv("WOMPI_CURRENCY", "COP").strip().upper()
+# URL a la que Wompi redirige al cliente tras finalizar el pago (opcional).
+# Wompi le agrega ?id=<transaction_id> automáticamente.
+WOMPI_REDIRECT_URL = os.getenv("WOMPI_REDIRECT_URL", "").strip()
 
 # Patrón base de referencia de cotización Odoo: S seguido de dígitos (S00001, S00123, etc.)
 # También aceptamos sufijos para intentos de pago únicos en Wompi: S00001-123456789
@@ -168,6 +171,8 @@ def build_wompi_checkout_url(reference: str, amount_in_cents: int, customer_emai
         params["signature:integrity"] = build_wompi_integrity_signature(reference, amount_in_cents, currency)
     if customer_email:
         params["customer-data:email"] = customer_email
+    if WOMPI_REDIRECT_URL:
+        params["redirect-url"] = WOMPI_REDIRECT_URL
     return f"{WOMPI_CHECKOUT_BASE_URL}?{urlencode(params)}"
 
 

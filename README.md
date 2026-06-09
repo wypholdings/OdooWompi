@@ -72,6 +72,7 @@ Variables principales:
 - `WOMPI_EVENT_SECRET`
 - `WOMPI_CURRENCY` (default `COP`)
 - `WOMPI_CHECKOUT_BASE_URL` (default `https://checkout.wompi.co/p/`)
+- `WOMPI_REDIRECT_URL` (opcional; URL a la que Wompi redirige al cliente al terminar el pago, ej. `https://wondertechsas.odoo.com/shop/confirmation`. Wompi le agrega `?id=<transaction_id>`)
 - `SKIP_SIGNATURE_VALIDATION` (`true`/`false`)
 - `PORT`
 
