@@ -99,6 +99,9 @@ WOMPI_CURRENCY = os.getenv("WOMPI_CURRENCY", "COP").strip().upper()
 # URL a la que Wompi redirige al cliente tras finalizar el pago (opcional).
 # Wompi le agrega ?id=<transaction_id> automáticamente.
 WOMPI_REDIRECT_URL = os.getenv("WOMPI_REDIRECT_URL", "").strip()
+# Nombre (o parte del nombre) del payment.provider en Odoo. Antes era "Wompi";
+# si lo renombran en Odoo (ej. "PSE"), ajustar esta variable sin tocar código.
+ODOO_PAYMENT_PROVIDER_NAME = os.getenv("ODOO_PAYMENT_PROVIDER_NAME", "wompi").strip()
 
 # Patrón base de referencia de cotización Odoo: S seguido de dígitos (S00001, S00123, etc.)
 # También aceptamos sufijos para intentos de pago únicos en Wompi: S00001-123456789
@@ -272,17 +275,18 @@ class OdooClient:
 
     def _find_payment_provider(self) -> int:
         """
-        Busca el payment.provider 'Wompi'. Debe existir previamente en Odoo.
+        Busca el payment.provider configurado (ODOO_PAYMENT_PROVIDER_NAME).
+        Debe existir previamente en Odoo.
         """
         provs = self.call(
             "payment.provider", "search",
-            [[["name", "ilike", "wompi"]]],
+            [[["name", "ilike", ODOO_PAYMENT_PROVIDER_NAME]]],
             {"limit": 1},
         )
         if not provs:
             raise RuntimeError(
-                "No se encontró payment.provider 'Wompi' en Odoo. "
-                "Créelo manualmente antes de usar este webhook."
+                f"No se encontró payment.provider '{ODOO_PAYMENT_PROVIDER_NAME}' en Odoo. "
+                "Créelo manualmente o ajuste ODOO_PAYMENT_PROVIDER_NAME en el .env."
             )
         return provs[0]
 
@@ -322,6 +326,20 @@ class OdooClient:
         partner_id = order["partner_id"][0]
 
         logger.info("Procesando pago PENDIENTE para %s | Monto: $%.2f", order_name, amount_paid)
+
+        # Idempotencia: si ya existe payment.transaction con esta referencia
+        # (evento reintentado), no crear otra.
+        existing_tx = self.call(
+            "payment.transaction", "search",
+            [[["reference", "=", f"WOMPI-{wompi_transaction_id}"]]],
+            {"limit": 1},
+        )
+        if existing_tx:
+            logger.info(
+                "payment.transaction WOMPI-%s ya existe (id=%s). Evento PENDING reintentado, sin acción.",
+                wompi_transaction_id, existing_tx[0],
+            )
+            return
 
         # Obtener moneda de la cotización
         order_full = self.call(
@@ -373,10 +391,27 @@ class OdooClient:
             order_name, amount_paid, total_paid, order_total, should_confirm,
         )
 
-        # Primero crear el pago en el diario de banco
-        payment_id = self._create_payment(order, amount_paid, wompi_transaction_id, post=True)
-        logger.info("Pago APROBADO (id=%s) para %s | $%.2f | WOMPI: %s",
-                    payment_id, order_name, amount_paid, wompi_transaction_id)
+        # Idempotencia: si Wompi reintenta el evento (ej. tras un 500 previo),
+        # no crear un segundo account.payment para la misma transacción.
+        memo = f"WOMPI {wompi_transaction_id} - {order_name}"
+        existing_for_tx = self.call(
+            "account.payment", "search",
+            [[["memo", "=", memo]]],
+            {"limit": 1},
+        )
+        if existing_for_tx:
+            logger.info(
+                "account.payment ya existe (id=%s) para WOMPI %s. Evento reintentado, no se duplica el pago.",
+                existing_for_tx[0], wompi_transaction_id,
+            )
+            payment_id = existing_for_tx[0]
+            total_paid -= amount_paid  # ya estaba contado en existing_payments
+            should_confirm = total_paid >= order_total
+        else:
+            # Primero crear el pago en el diario de banco
+            payment_id = self._create_payment(order, amount_paid, wompi_transaction_id, post=True)
+            logger.info("Pago APROBADO (id=%s) para %s | $%.2f | WOMPI: %s",
+                        payment_id, order_name, amount_paid, wompi_transaction_id)
 
         # Luego confirmar como orden de venta si el acumulado cubre el total
         if should_confirm and order["state"] in ("draft", "sent"):
@@ -391,6 +426,21 @@ class OdooClient:
         if pending_txs:
             self.call("payment.transaction", "write", [pending_txs, {"state": "done"}])
             logger.info("payment.transaction pendientes %s marcadas como done", pending_txs)
+
+        # Idempotencia: si ya existe payment.transaction con esta referencia
+        # (evento reintentado, o la pendiente recién marcada done), no crear otra.
+        # Además Odoo exige referencia única en payment.transaction.
+        existing_tx = self.call(
+            "payment.transaction", "search",
+            [[["reference", "=", f"WOMPI-{wompi_transaction_id}"]]],
+            {"limit": 1},
+        )
+        if existing_tx:
+            logger.info(
+                "payment.transaction WOMPI-%s ya existe (id=%s). No se crea otra.",
+                wompi_transaction_id, existing_tx[0],
+            )
+            return
 
         # Crear payment.transaction en estado 'done' para reflejar el pago en el portal
         order_full = self.call(

@@ -31,6 +31,7 @@ WOMPI_EVENT_SECRET=<prod_events_...>
 
 WOMPI_CURRENCY=COP
 WOMPI_REDIRECT_URL=https://wondertechsas.odoo.com/shop/confirmation
+ODOO_PAYMENT_PROVIDER_NAME=PSE
 PORT=7000
 SKIP_SIGNATURE_VALIDATION=false
 ```

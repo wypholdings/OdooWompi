@@ -68,7 +68,24 @@ Acciones:
 - Durante pruebas controladas puede usarse `SKIP_SIGNATURE_VALIDATION=true`.
 - En producción dejar `false`.
 
-## 6) Pago no refleja en portal
+## 6) `No se encontró payment.provider ... en Odoo`
+
+Síntoma:
+- El pago se crea y la orden se confirma, pero el webhook responde 500 con
+  `RuntimeError: No se encontró payment.provider`.
+
+Causa:
+- El `payment.provider` fue renombrado en Odoo (ej. de "Wompi" a "PSE") y el
+  webhook lo busca por `ODOO_PAYMENT_PROVIDER_NAME` (default `wompi`).
+
+Acción:
+- Ajustar `ODOO_PAYMENT_PROVIDER_NAME` en el `.env` al nombre actual del
+  provider y reiniciar con `pm2 restart wompi-webhook --update-env`.
+- Luego reenviar los eventos fallidos desde el dashboard de Wompi: la
+  idempotencia evita duplicar pagos y completa la `payment.transaction`
+  que faltó.
+
+## 7) Pago no refleja en portal
 
 Verificar:
 - `payment.transaction` se cree en `done` para la orden.
